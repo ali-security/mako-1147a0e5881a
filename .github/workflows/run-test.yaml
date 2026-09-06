@@ -1,20 +1,19 @@
 name: Run tests
 
 on:
-  # run on push in main or rel_* branches excluding changes are only on doc or example folders
-  push:
-    branches:
-      - main
-      - "rel_*"
-      # branches used to test the workflow
-      - "workflow_test_*"
-    paths-ignore:
-      - "docs/**"
+  # run manually only
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional pytest -k expression"
+        required: false
+        default: ""
 
 jobs:
   run-test:
     name: ${{ matrix.python-version }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       # run this job using this matrix
       matrix:
@@ -33,25 +32,65 @@ jobs:
           # See https://github.com/bbangert/beaker/pull/213
           - os: "windows-latest"
             python-version: "3.10"
+          # CPython 3.7 has no darwin-arm64 build (universal2 installers start at
+          # 3.8.10) and building it from source needs openssl@1.1, which Homebrew
+          # no longer ships. The 2022 x86_64 macos-latest that ran this leg is
+          # retired. macOS stays covered by 3.8/3.9/3.10.
+          - os: "macos-latest"
+            python-version: "3.7"
 
       fail-fast: false
 
     # steps to run in each job. Some are github actions, others run shell commands
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set up python
-        uses: actions/setup-python@v2
+        uses: MatteoH2O1999/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-          architecture: ${{ matrix.architecture }}
+          cache-build: true
+          allow-build: allow
 
       - name: Install dependencies
+        env:
+          PIP_INDEX_URL: "https://:2022-11-15@time-machines-pypi.sealsecurity.io/"
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade tox setuptools
+          # setuptools is pinned to the release-era version: the setup-python
+          # action force-installs setuptools 75.x, which reads the top-level
+          # packaging 21.3 that tox 3 pulls in and dies with
+          # "canonicalize_version() got an unexpected keyword argument
+          # 'strip_trailing_zero'" during tox's sdist-make.
+          pip install --upgrade tox "setuptools==65.5.1"
           pip list
 
       - name: Run tests
-        run: tox
+        shell: bash
+        env:
+          PIP_INDEX_URL: "https://:2022-11-15@time-machines-pypi.sealsecurity.io/"
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            tox -- -k "${{ inputs.test-filter }}"
+          else
+            tox
+          fi
+
+      - name: Build sdist and wheel
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
+        env:
+          PIP_INDEX_URL: "https://:2022-11-15@time-machines-pypi.sealsecurity.io/"
+          SOURCE_DATE_EPOCH: "1668523073"
+        run: |
+          pip install "build" "setuptools==65.5.1" "wheel==0.38.4"
+          python -m build --no-isolation --sdist --wheel --outdir dist/
+          ls -l dist/
+
+      - name: Upload distributions
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
